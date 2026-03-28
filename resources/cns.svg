@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Root node -->
+  <rect x="6" y="1" width="4" height="3" rx="0.5" fill="#C586C0"/>
+  <!-- Left child -->
+  <rect x="1" y="9" width="4" height="3" rx="0.5" fill="#9CDCFE"/>
+  <!-- Right child -->
+  <rect x="11" y="9" width="4" height="3" rx="0.5" fill="#9CDCFE"/>
+  <!-- Trunk line down -->
+  <line x1="8" y1="4" x2="8" y2="7" stroke="#858585" stroke-width="1"/>
+  <!-- Horizontal bar -->
+  <line x1="3" y1="7" x2="13" y2="7" stroke="#858585" stroke-width="1"/>
+  <!-- Left branch -->
+  <line x1="3" y1="7" x2="3" y2="9" stroke="#858585" stroke-width="1"/>
+  <!-- Right branch -->
+  <line x1="13" y1="7" x2="13" y2="9" stroke="#858585" stroke-width="1"/>
+</svg>
