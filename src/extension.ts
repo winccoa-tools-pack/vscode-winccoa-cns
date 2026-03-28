@@ -1,161 +1,142 @@
-/**
- * @fileoverview Main extension entry point for WinCC OA VS Code extensions.
- *
- * This file serves as a template/example for building WinCC OA VS Code extensions.
- * It demonstrates:
- * - Basic extension activation and deactivation
- * - Integration with dependent extensions (WinCC OA Project Admin)
- * - Configuration handling
- * - Command registration
- * - Logging setup
- *
- * Key concepts shown:
- * - Extension lifecycle management
- * - Safe dependency handling with activation waiting
- * - Project change event subscription
- * - Configuration change watching
- * - Proper cleanup on deactivation
- *
- * @example
- * ```typescript
- * // Basic extension structure
- * export async function activate(context: vscode.ExtensionContext) {
- *     // Initialize logging
- *     const outputChannel = ExtensionOutputChannel.initialize();
- *     context.subscriptions.push(outputChannel);
- *
- *     // Setup dependent extension integration
- *     await setupCoreExtensionIntegration(context);
- *
- *     // Register commands
- *     const command = vscode.commands.registerCommand('myExtension.command', handler);
- *     context.subscriptions.push(command);
- * }
- *
- * export function deactivate() {
- *     // Cleanup resources
- * }
- * ```
- */
-
-// src/extension.ts
 import * as vscode from 'vscode';
-import { ExtensionOutputChannel } from './extensionOutput';
-import { EXTENSION_CONFIG_SECTION, EXTENSION_ID, EXTENSION_NAME } from './const';
-import { setupCoreExtensionIntegration, cleanupCoreExtensionIntegration } from './otherExtensions';
+import { CnsMcpClient } from './cnsMcpClient.js';
+import { CnsEventSubscriber } from './cnsEventSubscriber.js';
+import { CnsTreeProvider } from './cnsTreeProvider.js';
+import { CnsNodeItem } from './cnsTreeItem.js';
+import { log, disposeOutput } from './extensionOutput.js';
+import type { McpServerExtensionApi, McpConnectionInfo } from './extensionApiTypes.js';
 
-/**
- * Interface representing a WinCC OA project.
- *
- * This matches the project structure provided by the WinCC OA Project Admin extension.
- * Used when subscribing to project change events.
- */
+const MCP_EXT_ID = 'RichardJanisch.winccoa-mcp-server';
 
-/**
- * Extension activation function - called when VS Code activates the extension.
- *
- * This function sets up the extension's core functionality:
- * 1. Initializes logging infrastructure
- * 2. Sets up integration with dependent extensions
- * 3. Registers configuration watchers
- * 4. Registers commands
- *
- * @param context - VS Code extension context for managing subscriptions and state
- *
- * @example
- * ```typescript
- * // VS Code calls this automatically when the extension activates
- * export async function activate(context: vscode.ExtensionContext) {
- *     // Your setup code here
- * }
- * ```
- */
-export async function activate(context: vscode.ExtensionContext) {
-    // Initialize output channel
-    const outputChannel = ExtensionOutputChannel.initialize();
-    context.subscriptions.push(outputChannel);
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  log('WinCC OA CNS extension activating');
 
-    ExtensionOutputChannel.info('Extension', `${EXTENSION_NAME} (${EXTENSION_ID}) activated`);
-    ExtensionOutputChannel.info('Extension', `Extension Path: ${context.extensionPath}`);
-    ExtensionOutputChannel.debug('Extension', `VS Code Version: ${vscode.version}`);
-
-    // Setup Core extension integration if in automatic mode
-    await setupCoreExtensionIntegration(context);
-
-    // Watch for configuration changes
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration(`${EXTENSION_CONFIG_SECTION}.logLevel`)) {
-                ExtensionOutputChannel.updateLogLevel();
-            }
-            if (e.affectsConfiguration(`${EXTENSION_CONFIG_SECTION}.pathSource`)) {
-                // Re-setup Core integration when mode changes
-                void setupCoreExtensionIntegration(context);
-            }
-        }),
+  // --- Acquire MCP extension API ---
+  const mcpExt = vscode.extensions.getExtension<McpServerExtensionApi>(MCP_EXT_ID);
+  if (!mcpExt) {
+    vscode.window.showWarningMessage(
+      'WinCC OA CNS: Could not find the WinCC OA MCP Server extension. Please install it.',
     );
+    return;
+  }
+  const mcpApi = await mcpExt.activate();
 
-    // Register a simple command
-    const disposable = vscode.commands.registerCommand('winccoa.helloWorld', () => {
-        vscode.window.showInformationMessage(
-            `Hello from WinCC OA VS Code Extension!\n${EXTENSION_NAME}`,
-        );
-    });
+  // --- Create core services ---
+  const treeProvider = new CnsTreeProvider();
+  const mcpClient = new CnsMcpClient({ url: '', token: '', authType: 'bearer' });
+  const eventSubscriber = new CnsEventSubscriber();
 
-    context.subscriptions.push(disposable);
+  // --- Status bar item ---
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBar.command = 'winccoaCns.refresh';
+  context.subscriptions.push(statusBar);
+
+  function updateStatusBar(connected: boolean, live: boolean): void {
+    if (!connected) {
+      statusBar.text = '$(debug-disconnect) CNS';
+      statusBar.tooltip = 'WinCC OA CNS: Not connected';
+      statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    } else if (live) {
+      statusBar.text = '$(circle-filled) CNS';
+      statusBar.tooltip = 'WinCC OA CNS: Connected — live updates active';
+      statusBar.backgroundColor = undefined;
+    } else {
+      statusBar.text = '$(circle-outline) CNS';
+      statusBar.tooltip = 'WinCC OA CNS: Connected — live updates reconnecting…';
+      statusBar.backgroundColor = undefined;
+    }
+    statusBar.show();
+  }
+
+  // --- Tree view ---
+  const treeView = vscode.window.createTreeView('winccoaCns', {
+    treeDataProvider: treeProvider,
+    showCollapseAll: true,
+  });
+  context.subscriptions.push(treeView);
+
+  // --- CNS change event → targeted tree refresh ---
+  context.subscriptions.push(
+    eventSubscriber.onCnsChanged(_uri => {
+      treeProvider.refresh();
+    }),
+  );
+
+  // --- Connect / disconnect based on MCP state ---
+  async function onConnectionChange(info: McpConnectionInfo | null): Promise<void> {
+    if (!info) {
+      log('MCP disconnected — pausing CNS tree');
+      eventSubscriber.disconnect();
+      treeProvider.setClient(undefined);
+      updateStatusBar(false, false);
+      return;
+    }
+
+    log(`MCP connected at ${info.url}`);
+    mcpClient.updateConfig({ url: info.url, token: info.token, authType: info.authType });
+    treeProvider.setClient(mcpClient);
+    updateStatusBar(true, false);
+
+    // Start SSE subscription — we need a session ID first, obtained by initializing the client
+    try {
+      // Trigger initialization (callTool internally calls initialize)
+      await treeProvider.refresh();
+      // The client now has a session; pass it to the event subscriber
+      const sessionId = (mcpClient as unknown as { sessionId?: string }).sessionId;
+      if (sessionId) {
+        eventSubscriber.connect({ url: info.url, token: info.token, authType: info.authType }, sessionId);
+        updateStatusBar(true, true);
+      }
+    } catch (err) {
+      log(`Failed to start CNS event subscription: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // React to future connection changes
+  context.subscriptions.push(mcpApi.onDidChangeConnection(onConnectionChange));
+
+  // React to current state immediately
+  const currentInfo = mcpApi.getConnectionInfo();
+  await onConnectionChange(currentInfo);
+
+  // --- Commands ---
+  context.subscriptions.push(
+    vscode.commands.registerCommand('winccoaCns.refresh', () => {
+      treeProvider.refresh();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('winccoaCns.copyDpName', (item: CnsNodeItem) => {
+      if (item?.info?.linkedDp) {
+        vscode.env.clipboard.writeText(item.info.linkedDp);
+        vscode.window.showInformationMessage(`Copied DP name: ${item.info.linkedDp}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('winccoaCns.copyCnsPath', (item: CnsNodeItem) => {
+      const path = item?.info?.path ?? (item as unknown as { viewPath?: string }).viewPath;
+      if (path) {
+        vscode.env.clipboard.writeText(path);
+        vscode.window.showInformationMessage(`Copied CNS path: ${path}`);
+      }
+    }),
+  );
+
+  // --- Cleanup ---
+  context.subscriptions.push({
+    dispose: () => {
+      eventSubscriber.dispose();
+      treeProvider.dispose();
+      disposeOutput();
+    },
+  });
+
+  log('WinCC OA CNS extension activated');
 }
 
-/**
- * Sets up integration with the WinCC OA Project Admin core extension.
- *
- * This function demonstrates best practices for handling dependent extensions:
- * - Checks if the dependent extension is installed
- * - Waits for the dependent extension to activate (with timeout)
- * - Falls back to manual activation if needed
- * - Subscribes to project change events
- * - Handles configuration-based enable/disable
- *
- * The integration supports two modes:
- * - 'automatic': Full integration with project detection
- * - Other values: Static mode (integration disabled)
- *
- * @param context - VS Code extension context for managing subscriptions
- * @returns Promise that resolves when setup is complete
- *
- * @example
- * ```typescript
- * // In your activate function:
- * await setupCoreExtensionIntegration(context);
- *
- * // The extension will now automatically:
- * // - Detect when WinCC OA projects change
- * // - Log project information
- * // - Adapt to the current project context
- * ```
- */
-
-/**
- * Extension deactivation function - called when VS Code deactivates the extension.
- *
- * This function should clean up any resources that were allocated during activation:
- * - Unsubscribe from event listeners
- * - Clear timers/intervals
- * - Close connections
- * - Log deactivation
- *
- * Note: VS Code may call this function at any time, so it should be robust
- * and handle cases where resources may not be initialized.
- *
- * @example
- * ```typescript
- * export function deactivate() {
- *     // Clean up your resources here
- *     ExtensionOutputChannel.info('Extension', 'Extension deactivated');
- * }
- * ```
- */
-export function deactivate() {
-    ExtensionOutputChannel.info('Extension', `WinCC OA ${EXTENSION_NAME} Extension deactivated`);
-    // Clean up core extension integration resources
-    cleanupCoreExtensionIntegration();
+export function deactivate(): void {
+  // Cleanup handled via context.subscriptions
 }
