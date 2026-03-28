@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { CnsMcpClient } from './cnsMcpClient.js';
+import type { CnsHttpClient } from './cnsHttpClient.js';
 import { CnsViewItem, CnsNodeItem, type CnsItem } from './cnsTreeItem.js';
 import type { CnsNodeInfo } from './types.js';
 import { log } from './extensionOutput.js';
@@ -11,9 +11,9 @@ export class CnsTreeProvider implements vscode.TreeDataProvider<CnsItem> {
   readonly onDidChangeTreeData: vscode.Event<CnsItem | undefined | null> = this._onDidChangeTreeData.event;
 
   private state: ProviderState = 'disconnected';
-  private client: CnsMcpClient | undefined;
+  private client: CnsHttpClient | undefined;
 
-  setClient(client: CnsMcpClient | undefined): void {
+  setClient(client: CnsHttpClient | undefined): void {
     this.client = client;
     this.state = client ? 'connected' : 'disconnected';
     this.refresh();

@@ -1,18 +1,22 @@
 /**
- * Subscribes to CNS live change notifications from the MCP server via SSE.
+ * Subscribes to CNS live change notifications from the standalone CNS manager via SSE.
  *
- * Opens a GET /mcp SSE stream, sends a resources/subscribe for "cns://",
- * and fires an event whenever notifications/resources/updated is received.
+ * Opens a GET /cns/events SSE stream and fires an event whenever a
+ * notifications/resources/updated message is received.
  *
  * Auto-reconnects with exponential backoff (1s → 30s cap).
  */
 
 import * as vscode from 'vscode';
 import { log } from './extensionOutput.js';
-import type { McpConnectionConfig } from './cnsMcpClient.js';
 
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
+
+export interface CnsEventConfig {
+  baseUrl: string;
+  token: string;
+}
 
 export class CnsEventSubscriber {
   private readonly _onCnsChanged = new vscode.EventEmitter<string | undefined>();
@@ -23,15 +27,13 @@ export class CnsEventSubscriber {
   private reconnectTimer: NodeJS.Timeout | undefined;
   private backoff = BACKOFF_BASE_MS;
   private disposed = false;
-  private config: McpConnectionConfig | undefined;
-  private sessionId: string | undefined;
+  private config: CnsEventConfig | undefined;
 
   constructor() {}
 
-  /** Start (or restart) listening with the given connection config + session ID. */
-  connect(config: McpConnectionConfig, sessionId: string): void {
+  /** Start (or restart) listening with the given server config. */
+  connect(config: CnsEventConfig): void {
     this.config = config;
-    this.sessionId = sessionId;
     this.backoff = BACKOFF_BASE_MS;
     this.startStream();
   }
@@ -42,7 +44,6 @@ export class CnsEventSubscriber {
     this.abortController?.abort();
     this.abortController = undefined;
     this.config = undefined;
-    this.sessionId = undefined;
     log('CNS event subscriber disconnected');
   }
 
@@ -53,10 +54,10 @@ export class CnsEventSubscriber {
   }
 
   private startStream(): void {
-    if (this.disposed || !this.config || !this.sessionId) return;
+    if (this.disposed || !this.config) return;
     this.abortController?.abort();
     this.abortController = new AbortController();
-    this.runStream(this.config, this.sessionId, this.abortController.signal).catch(err => {
+    this.runStream(this.config, this.abortController.signal).catch(err => {
       if (!this.disposed && !this.abortController?.signal.aborted) {
         log(`CNS SSE stream error: ${err instanceof Error ? err.message : String(err)}`);
         this.scheduleReconnect();
@@ -64,19 +65,18 @@ export class CnsEventSubscriber {
     });
   }
 
-  private async runStream(config: McpConnectionConfig, sessionId: string, signal: AbortSignal): Promise<void> {
-    const headers: Record<string, string> = {
-      'Accept': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'mcp-session-id': sessionId,
-    };
-    if (config.authType === 'bearer') {
-      headers['Authorization'] = `Bearer ${config.token}`;
-    } else {
-      headers['Authorization'] = `Basic ${Buffer.from(config.token).toString('base64')}`;
-    }
+  private async runStream(config: CnsEventConfig, signal: AbortSignal): Promise<void> {
+    const url = `${config.baseUrl.replace(/\/$/, '')}/cns/events`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Authorization': `Bearer ${config.token}`,
+      },
+      signal,
+    });
 
-    const res = await fetch(config.url, { method: 'GET', headers, signal });
     if (!res.ok || !res.body) {
       throw new Error(`SSE connect failed: HTTP ${res.status}`);
     }
@@ -111,7 +111,6 @@ export class CnsEventSubscriber {
     if (line.startsWith('data:')) {
       this.currentEvent.data = line.slice(5).trim();
     } else if (line === '') {
-      // Dispatch event
       if (this.currentEvent.data) {
         this.handleData(this.currentEvent.data);
       }
@@ -128,7 +127,7 @@ export class CnsEventSubscriber {
         this._onCnsChanged.fire(uri);
       }
     } catch {
-      // Ignore non-JSON SSE data
+      // Ignore non-JSON SSE data (e.g. the initial ": connected" comment line)
     }
   }
 
@@ -137,7 +136,7 @@ export class CnsEventSubscriber {
     this.cancelReconnect();
     log(`CNS SSE reconnecting in ${this.backoff}ms…`);
     this.reconnectTimer = setTimeout(() => {
-      if (!this.disposed && this.config && this.sessionId) {
+      if (!this.disposed && this.config) {
         this.startStream();
       }
     }, this.backoff);

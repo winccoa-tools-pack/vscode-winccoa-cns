@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Standalone CNS HTTP manager** (`managers/cns-server.js`): a WinCC OA `node` manager that
+  exposes CNS data over a lightweight HTTP REST + SSE server using the native `winccoa-manager`
+  module — no external MCP server extension required.
+- `managers/.env.example`: configuration template for the CNS manager (`CNS_SERVER_PORT`,
+  `CNS_SERVER_TOKEN`).
+- `docs/manager-setup.md`: step-by-step guide for deploying the manager and registering it via
+  **vscode-winccoa-project-admin**.
+- New VS Code settings: `winccoaCns.serverUrl` and `winccoaCns.token`.
+- New command **WinCC OA CNS: Add CNS Manager to WinCC OA Project** (`winccoaCns.addManager`)
+  that invokes `vscode-winccoa-project-admin` to register the manager and then guides settings
+  configuration.
+
+### Changed
+
+- The extension now connects directly to the standalone CNS manager HTTP server instead of
+  the `RichardJanisch.winccoa-mcp-server` extension.
+- `cnsMcpClient.ts` replaced by `cnsHttpClient.ts` — plain REST fetch, no JSON-RPC session
+  management.
+- `cnsEventSubscriber.ts` simplified — connects to `GET /cns/events` without session ID.
+- `extension.ts` reads `winccoaCns.serverUrl` / `winccoaCns.token` from VS Code settings
+  and reconnects automatically on settings change.
+
+### Removed
+
+- Hard dependency on `RichardJanisch.winccoa-mcp-server` extension.
+- `src/extensionApiTypes.ts` (MCP server API type mirrors — no longer needed).
+
 ## [0.2.1] - 2026-03-23
 
 ### Fixed

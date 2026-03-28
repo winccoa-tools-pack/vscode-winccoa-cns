@@ -1,29 +1,19 @@
 import * as vscode from 'vscode';
-import { CnsMcpClient } from './cnsMcpClient.js';
+import { CnsHttpClient } from './cnsHttpClient.js';
 import { CnsEventSubscriber } from './cnsEventSubscriber.js';
 import { CnsTreeProvider } from './cnsTreeProvider.js';
 import { CnsNodeItem } from './cnsTreeItem.js';
 import { log, disposeOutput } from './extensionOutput.js';
-import type { McpServerExtensionApi, McpConnectionInfo } from './extensionApiTypes.js';
 
-const MCP_EXT_ID = 'RichardJanisch.winccoa-mcp-server';
+const CONFIG_SECTION = 'winccoaCns';
+const PROJECT_ADMIN_EXT_ID = 'RichardJanisch.winccoa-project-admin';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   log('WinCC OA CNS extension activating');
 
-  // --- Acquire MCP extension API ---
-  const mcpExt = vscode.extensions.getExtension<McpServerExtensionApi>(MCP_EXT_ID);
-  if (!mcpExt) {
-    vscode.window.showWarningMessage(
-      'WinCC OA CNS: Could not find the WinCC OA MCP Server extension. Please install it.',
-    );
-    return;
-  }
-  const mcpApi = await mcpExt.activate();
-
   // --- Create core services ---
   const treeProvider = new CnsTreeProvider();
-  const mcpClient = new CnsMcpClient({ url: '', token: '', authType: 'bearer' });
+  const httpClient = new CnsHttpClient({ url: '', token: '' });
   const eventSubscriber = new CnsEventSubscriber();
 
   // --- Status bar item ---
@@ -31,12 +21,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBar.command = 'winccoaCns.refresh';
   context.subscriptions.push(statusBar);
 
-  function updateStatusBar(connected: boolean, live: boolean): void {
-    if (!connected) {
+  function updateStatusBar(state: 'disconnected' | 'connected' | 'live'): void {
+    if (state === 'disconnected') {
       statusBar.text = '$(debug-disconnect) CNS';
-      statusBar.tooltip = 'WinCC OA CNS: Not connected';
+      statusBar.tooltip = 'WinCC OA CNS: Not connected — configure winccoaCns.serverUrl and winccoaCns.token';
       statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-    } else if (live) {
+    } else if (state === 'live') {
       statusBar.text = '$(circle-filled) CNS';
       statusBar.tooltip = 'WinCC OA CNS: Connected — live updates active';
       statusBar.backgroundColor = undefined;
@@ -62,42 +52,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // --- Connect / disconnect based on MCP state ---
-  async function onConnectionChange(info: McpConnectionInfo | null): Promise<void> {
-    if (!info) {
-      log('MCP disconnected — pausing CNS tree');
+  /** Read settings and (re-)connect to the CNS server. */
+  async function applyConfig(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+    const serverUrl = cfg.get<string>('serverUrl', '').trim();
+    const token = cfg.get<string>('token', '').trim();
+
+    if (!serverUrl || !token) {
       eventSubscriber.disconnect();
       treeProvider.setClient(undefined);
-      updateStatusBar(false, false);
+      updateStatusBar('disconnected');
+      if (!serverUrl || !token) {
+        const action = await vscode.window.showWarningMessage(
+          'WinCC OA CNS: Please configure winccoaCns.serverUrl and winccoaCns.token to connect to the CNS manager.',
+          'Open Settings',
+        );
+        if (action === 'Open Settings') {
+          await vscode.commands.executeCommand('workbench.action.openSettings', 'winccoaCns');
+        }
+      }
       return;
     }
 
-    log(`MCP connected at ${info.url}`);
-    mcpClient.updateConfig({ url: info.url, token: info.token, authType: info.authType });
-    treeProvider.setClient(mcpClient);
-    updateStatusBar(true, false);
+    log(`Connecting to CNS server at ${serverUrl}`);
+    httpClient.updateConfig({ url: serverUrl, token });
+    treeProvider.setClient(httpClient);
+    updateStatusBar('connected');
 
-    // Start SSE subscription — we need a session ID first, obtained by initializing the client
     try {
-      // Trigger initialization (callTool internally calls initialize)
       await treeProvider.refresh();
-      // The client now has a session; pass it to the event subscriber
-      const sessionId = (mcpClient as unknown as { sessionId?: string }).sessionId;
-      if (sessionId) {
-        eventSubscriber.connect({ url: info.url, token: info.token, authType: info.authType }, sessionId);
-        updateStatusBar(true, true);
-      }
+      eventSubscriber.connect({ baseUrl: serverUrl, token });
+      updateStatusBar('live');
     } catch (err) {
-      log(`Failed to start CNS event subscription: ${err instanceof Error ? err.message : String(err)}`);
+      log(`Failed to connect to CNS server: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  // React to future connection changes
-  context.subscriptions.push(mcpApi.onDidChangeConnection(onConnectionChange));
+  // Re-connect when settings change
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration(CONFIG_SECTION)) {
+        applyConfig().catch(err => log(`Config change error: ${String(err)}`));
+      }
+    }),
+  );
 
-  // React to current state immediately
-  const currentInfo = mcpApi.getConnectionInfo();
-  await onConnectionChange(currentInfo);
+  // Apply config immediately on activation
+  await applyConfig();
 
   // --- Commands ---
   context.subscriptions.push(
@@ -121,6 +122,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (path) {
         vscode.env.clipboard.writeText(path);
         vscode.window.showInformationMessage(`Copied CNS path: ${path}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('winccoaCns.addManager', async () => {
+      // Invoke project-admin's add manager command if available, then guide settings setup
+      const adminExt = vscode.extensions.getExtension(PROJECT_ADMIN_EXT_ID);
+      if (adminExt) {
+        await vscode.commands.executeCommand('winccoaProjectAdmin.addManager');
+      } else {
+        vscode.window.showInformationMessage(
+          'Install the WinCC OA Project Admin extension to add the CNS manager via the UI, ' +
+          'or add a "node" manager manually pointing to managers/cns-server.js in your project.',
+        );
+      }
+      // After adding the manager, guide the user to configure VS Code settings
+      const action = await vscode.window.showInformationMessage(
+        'After the CNS manager is running, configure the server URL and token in VS Code settings.',
+        'Open Settings',
+      );
+      if (action === 'Open Settings') {
+        await vscode.commands.executeCommand('workbench.action.openSettings', 'winccoaCns');
       }
     }),
   );
