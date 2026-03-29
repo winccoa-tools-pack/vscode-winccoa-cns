@@ -133,11 +133,11 @@ function pushCnsChange(changedPath) {
 
 // Subscribe to all CNS changes once.
 try {
-  winccoa.cnsConnect('', (_action, node) => {
+  winccoa.cnsAddObserver('', (_action, node) => {
     pushCnsChange(node?.path ?? '');
   });
 } catch (err) {
-  console.error('[cns-server] cnsConnect failed (CNS may not be available yet):', err.message);
+  console.error('[cns-server] cnsAddObserver failed (CNS may not be available yet):', err.message);
 }
 
 // ---------------------------------------------------------------------------
