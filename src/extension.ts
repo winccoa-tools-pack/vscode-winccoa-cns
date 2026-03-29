@@ -98,46 +98,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // --- Project Admin integration ---
   let currentProject: { projectDir: string; name: string; id?: string; version?: string } | undefined;
 
-  async function waitForExtension(ids: string[], timeoutMs: number): Promise<vscode.Extension<unknown> | undefined> {
-    for (const id of ids) {
+  function findProjectAdminExtension(): vscode.Extension<unknown> | undefined {
+    for (const id of PROJECT_ADMIN_IDS) {
       const ext = vscode.extensions.getExtension(id);
-      if (ext) { return ext; }
-    }
-
-    log(`Extension not yet available for IDs [${ids.join(', ')}] — waiting up to ${timeoutMs}ms…`);
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 200));
-      for (const id of ids) {
-        const ext = vscode.extensions.getExtension(id);
-        if (ext) { return ext; }
+      if (ext) {
+        log(`Found project-admin extension: ${id} (active=${ext.isActive})`);
+        return ext;
       }
     }
+
+    // Debug: list all winccoa extensions
+    const allExts = vscode.extensions.all
+      .filter(e => e.id.toLowerCase().includes('winccoa'))
+      .map(e => `  ${e.id} (active=${e.isActive})`);
+    log(`WinCC OA extensions found:\n${allExts.length > 0 ? allExts.join('\n') : '  (none)'}`);
+    log('project-admin extension not found under any known ID');
     return undefined;
+  }
+
+  interface ProjectAdminApi {
+    getCurrentProject(): { projectDir: string; name: string; id?: string; version?: string } | undefined;
+    onDidChangeProject(listener: (project: { projectDir: string; name: string; id?: string; version?: string } | undefined) => void): () => void;
+  }
+
+  async function getProjectAdminApi(): Promise<ProjectAdminApi | undefined> {
+    const ext = findProjectAdminExtension();
+    if (!ext) return undefined;
+
+    if (!ext.isActive) {
+      log('project-admin not active yet, waiting for activation...');
+      try {
+        const api = await ext.activate();
+        log(`project-admin activated, exports: ${JSON.stringify(Object.keys(api || {}))}`);
+        return api as unknown as ProjectAdminApi;
+      } catch (err) {
+        log(`Failed to activate project-admin: ${err}`);
+        return undefined;
+      }
+    }
+
+    const api = ext.exports as unknown as ProjectAdminApi;
+    log(`project-admin exports: ${JSON.stringify(Object.keys(api || {}))}`);
+    return api;
   }
 
   async function subscribeToProjectAdmin(): Promise<void> {
     log(`Looking up Project Admin extension, candidates: [${PROJECT_ADMIN_IDS.join(', ')}]…`);
-    const ext = await waitForExtension(PROJECT_ADMIN_IDS, 5000);
-    if (!ext) {
-      const allExtensions = vscode.extensions.all.map(e => e.id);
-      const winccoaExtensions = allExtensions.filter(id => id.toLowerCase().includes('winccoa'));
-      log(`Project Admin extension not found after timeout — skipping project change subscription`);
-      log(`Installed WinCC OA extensions: ${winccoaExtensions.length ? winccoaExtensions.join(', ') : '(none)'}`);
-      return;
-    }
-    if (!ext.isActive) {
-      log('Waiting for Project Admin extension to activate…');
-      const deadline = Date.now() + 4000;
-      while (!ext.isActive && Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      if (!ext.isActive) {
-        log('Project Admin still inactive — activating (fallback)…');
-        await ext.activate();
-      }
-    }
-    const api = ext.exports;
+    const api = await getProjectAdminApi();
     if (!api?.onDidChangeProject) {
       log('Project Admin API not available');
       return;
