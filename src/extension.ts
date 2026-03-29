@@ -7,7 +7,10 @@ import { CnsSetupWizard } from './cnsSetupWizard.js';
 import { log, disposeOutput } from './extensionOutput.js';
 
 const CONFIG_SECTION = 'winccoaCns';
-const PROJECT_ADMIN_EXT_ID = 'RichardJanisch.winccoa-project-admin';
+const PROJECT_ADMIN_IDS = [
+  'RichardJanisch.winccoa-project-admin',
+  'winccoa-tools-pack.winccoa-project-admin',
+];
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   log('WinCC OA CNS extension activating');
@@ -93,16 +96,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await applyConfig();
 
   // --- Project Admin integration ---
-  let currentProject: { projectDir: string; name: string } | undefined;
+  let currentProject: { projectDir: string; name: string; id?: string; version?: string } | undefined;
+
+  async function waitForExtension(ids: string[], timeoutMs: number): Promise<vscode.Extension<unknown> | undefined> {
+    for (const id of ids) {
+      const ext = vscode.extensions.getExtension(id);
+      if (ext) { return ext; }
+    }
+
+    log(`Extension not yet available for IDs [${ids.join(', ')}] — waiting up to ${timeoutMs}ms…`);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      for (const id of ids) {
+        const ext = vscode.extensions.getExtension(id);
+        if (ext) { return ext; }
+      }
+    }
+    return undefined;
+  }
 
   async function subscribeToProjectAdmin(): Promise<void> {
-    const ext = vscode.extensions.getExtension(PROJECT_ADMIN_EXT_ID);
+    log(`Looking up Project Admin extension, candidates: [${PROJECT_ADMIN_IDS.join(', ')}]…`);
+    const ext = await waitForExtension(PROJECT_ADMIN_IDS, 5000);
     if (!ext) {
-      log('Project Admin extension not found — skipping project change subscription');
+      const allExtensions = vscode.extensions.all.map(e => e.id);
+      const winccoaExtensions = allExtensions.filter(id => id.toLowerCase().includes('winccoa'));
+      log(`Project Admin extension not found after timeout — skipping project change subscription`);
+      log(`Installed WinCC OA extensions: ${winccoaExtensions.length ? winccoaExtensions.join(', ') : '(none)'}`);
       return;
     }
     if (!ext.isActive) {
-      await ext.activate();
+      log('Waiting for Project Admin extension to activate…');
+      const deadline = Date.now() + 4000;
+      while (!ext.isActive && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!ext.isActive) {
+        log('Project Admin still inactive — activating (fallback)…');
+        await ext.activate();
+      }
     }
     const api = ext.exports;
     if (!api?.onDidChangeProject) {
@@ -114,13 +147,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (api.getCurrentProject) {
       const project = api.getCurrentProject();
       if (project) {
-        currentProject = { projectDir: project.projectDir, name: project.name };
+        currentProject = { projectDir: project.projectDir, name: project.name, id: project.id, version: project.version };
         await handleProjectChange(project);
       }
     }
 
-    api.onDidChangeProject(async (project: { projectDir: string; name: string } | undefined) => {
-      currentProject = project ? { projectDir: project.projectDir, name: project.name } : undefined;
+    api.onDidChangeProject(async (project: { projectDir: string; name: string; id?: string; version?: string } | undefined) => {
+      currentProject = project ? { projectDir: project.projectDir, name: project.name, id: project.id, version: project.version } : undefined;
       if (project) {
         await handleProjectChange(project);
       }
@@ -128,7 +161,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log('Subscribed to Project Admin project changes');
   }
 
-  async function handleProjectChange(project: { projectDir: string; name: string }): Promise<void> {
+  async function handleProjectChange(project: { projectDir: string; name: string; id?: string; version?: string }): Promise<void> {
     const installed = await CnsSetupWizard.isCnsManagerInstalled(project.projectDir);
     if (installed) {
       log(`CNS manager already installed in ${project.name}`);
@@ -140,6 +173,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       project.projectDir,
       project.name,
       context.extensionPath,
+      project.id,
+      project.version,
     );
     if (success) {
       // Settings were auto-configured — reconnect
@@ -182,6 +217,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           currentProject.projectDir,
           currentProject.name,
           context.extensionPath,
+          currentProject.id,
+          currentProject.version,
         );
         if (success) {
           await applyConfig();
