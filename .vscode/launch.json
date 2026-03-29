@@ -10,7 +10,8 @@
 			"type": "extensionHost",
 			"request": "launch",
 			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}"
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"--extensionDevelopmentPath=${workspaceFolder}/../vscode-winccoa-project-admin"
 			],
 			"outFiles": [
 				"${workspaceFolder}/out/**/*.js"

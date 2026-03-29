@@ -2,14 +2,14 @@
   "name": "winccoa-cns",
   "displayName": "WinCC OA CNS Browser",
   "description": "Browse the WinCC OA Component Naming System (CNS) tree with live updates",
-  "publisher": "RichardJanisch",
+  "publisher": "jakobmattes",
   "version": "0.1.0",
   "preview": true,
-  "author": "Richard Janisch",
+  "author": "Jakob Mattes",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rjanisch/vscode-winccoa-cns.git"
+    "url": "https://github.com/winccoa-tools-pack/vscode-winccoa-cns.git"
   },
   "engines": {
     "vscode": "^1.80.0"
@@ -28,16 +28,23 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ],
   "main": "dist/extension.js",
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "build": "esbuild src/extension.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/extension.js --external:vscode",
-    "watch": "esbuild src/extension.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/extension.js --external:vscode --watch",
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
     "typecheck": "tsc --noEmit",
     "compile": "npm run typecheck && npm run build",
     "package": "npx @vscode/vsce package --out bin/",
     "start": "code --extensionDevelopmentPath=.",
     "start:insiders": "code-insiders --extensionDevelopmentPath=."
+  },
+  "dependencies": {
+    "@winccoa-tools-pack/npm-winccoa-core": "0.2.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
