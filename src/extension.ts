@@ -3,6 +3,7 @@ import { CnsHttpClient } from './cnsHttpClient.js';
 import { CnsEventSubscriber } from './cnsEventSubscriber.js';
 import { CnsTreeProvider } from './cnsTreeProvider.js';
 import { CnsNodeItem } from './cnsTreeItem.js';
+import { CnsSetupWizard } from './cnsSetupWizard.js';
 import { log, disposeOutput } from './extensionOutput.js';
 
 const CONFIG_SECTION = 'winccoaCns';
@@ -62,15 +63,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       eventSubscriber.disconnect();
       treeProvider.setClient(undefined);
       updateStatusBar('disconnected');
-      if (!serverUrl || !token) {
-        const action = await vscode.window.showWarningMessage(
-          'WinCC OA CNS: Please configure winccoaCns.serverUrl and winccoaCns.token to connect to the CNS manager.',
-          'Open Settings',
-        );
-        if (action === 'Open Settings') {
-          await vscode.commands.executeCommand('workbench.action.openSettings', 'winccoaCns');
-        }
-      }
       return;
     }
 
@@ -100,6 +92,63 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Apply config immediately on activation
   await applyConfig();
 
+  // --- Project Admin integration ---
+  let currentProject: { projectDir: string; name: string } | undefined;
+
+  async function subscribeToProjectAdmin(): Promise<void> {
+    const ext = vscode.extensions.getExtension(PROJECT_ADMIN_EXT_ID);
+    if (!ext) {
+      log('Project Admin extension not found — skipping project change subscription');
+      return;
+    }
+    if (!ext.isActive) {
+      await ext.activate();
+    }
+    const api = ext.exports;
+    if (!api?.onDidChangeProject) {
+      log('Project Admin API not available');
+      return;
+    }
+
+    // Check initial project
+    if (api.getCurrentProject) {
+      const project = api.getCurrentProject();
+      if (project) {
+        currentProject = { projectDir: project.projectDir, name: project.name };
+        await handleProjectChange(project);
+      }
+    }
+
+    api.onDidChangeProject(async (project: { projectDir: string; name: string } | undefined) => {
+      currentProject = project ? { projectDir: project.projectDir, name: project.name } : undefined;
+      if (project) {
+        await handleProjectChange(project);
+      }
+    });
+    log('Subscribed to Project Admin project changes');
+  }
+
+  async function handleProjectChange(project: { projectDir: string; name: string }): Promise<void> {
+    const installed = await CnsSetupWizard.isCnsManagerInstalled(project.projectDir);
+    if (installed) {
+      log(`CNS manager already installed in ${project.name}`);
+      await applyConfig();
+      return;
+    }
+
+    const success = await CnsSetupWizard.runSetup(
+      project.projectDir,
+      project.name,
+      context.extensionPath,
+    );
+    if (success) {
+      // Settings were auto-configured — reconnect
+      await applyConfig();
+    }
+  }
+
+  await subscribeToProjectAdmin();
+
   // --- Commands ---
   context.subscriptions.push(
     vscode.commands.registerCommand('winccoaCns.refresh', () => {
@@ -128,23 +177,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.commands.registerCommand('winccoaCns.addManager', async () => {
-      // Invoke project-admin's add manager command if available, then guide settings setup
-      const adminExt = vscode.extensions.getExtension(PROJECT_ADMIN_EXT_ID);
-      if (adminExt) {
-        await vscode.commands.executeCommand('winccoaProjectAdmin.addManager');
-      } else {
-        vscode.window.showInformationMessage(
-          'Install the WinCC OA Project Admin extension to add the CNS manager via the UI, ' +
-          'or add a "node" manager manually pointing to managers/cns-server.js in your project.',
+      if (currentProject) {
+        const success = await CnsSetupWizard.runSetup(
+          currentProject.projectDir,
+          currentProject.name,
+          context.extensionPath,
         );
-      }
-      // After adding the manager, guide the user to configure VS Code settings
-      const action = await vscode.window.showInformationMessage(
-        'After the CNS manager is running, configure the server URL and token in VS Code settings.',
-        'Open Settings',
-      );
-      if (action === 'Open Settings') {
-        await vscode.commands.executeCommand('workbench.action.openSettings', 'winccoaCns');
+        if (success) {
+          await applyConfig();
+        }
+      } else {
+        vscode.window.showWarningMessage(
+          'No WinCC OA project selected. Please select a project via the Project Admin extension first.',
+        );
       }
     }),
   );
