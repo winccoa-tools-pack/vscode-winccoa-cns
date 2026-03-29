@@ -11,11 +11,18 @@ import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import {
+  PmonComponent,
+  ProjEnvManagerOptions,
+  ProjEnvManagerStartMode,
+} from '@winccoa-tools-pack/npm-winccoa-core';
 import { log } from './extensionOutput.js';
-import { managerExists, addManager, getNextFreeManagerNumber } from './managerConfigHelper.js';
+import { managerExists, addManager } from './managerConfigHelper.js';
 
 const CNS_SUBPATH = 'javascript/vscodeCns';
 const CNS_SCRIPT_NAME = 'index.js';
+const CNS_SCRIPT_REL = 'vscodeCns\\index.js';
+const CNS_MANAGER_KEY = 'vscodeCns';
 const DEFAULT_PORT = 4712;
 
 export class CnsSetupWizard {
@@ -36,6 +43,8 @@ export class CnsSetupWizard {
     projectDir: string,
     projectName: string,
     extensionPath: string,
+    projectId?: string,
+    winCCOAVersion?: string,
   ): Promise<boolean> {
     log(`Starting CNS manager setup for project: ${projectName}`);
 
@@ -69,9 +78,9 @@ export class CnsSetupWizard {
           progress.report({ increment: 40, message: 'Creating configuration…' });
           await this.createEnvFile(projectDir, token);
 
-          // Step 3 — Register manager in config/progs
+          // Step 3 — Register manager (PMON runtime + config/progs)
           progress.report({ increment: 60, message: 'Adding manager to project…' });
-          await this.registerManager(projectDir);
+          await this.registerManager(projectDir, projectId, winCCOAVersion);
 
           // Step 4 — Auto-configure VS Code settings
           progress.report({ increment: 80, message: 'Configuring VS Code settings…' });
@@ -123,21 +132,82 @@ export class CnsSetupWizard {
     log(`Created .env at ${envPath}`);
   }
 
-  private static async registerManager(projectDir: string): Promise<void> {
-    const already = await managerExists(projectDir, 'node', 'vscodeCns');
-    if (already) {
-      log('CNS manager already registered in config/progs — skipping');
-      return;
+  private static async registerManager(
+    projectDir: string,
+    projectId?: string,
+    winCCOAVersion?: string,
+  ): Promise<void> {
+    const existsInConfig = await managerExists(projectDir, 'node', CNS_MANAGER_KEY);
+    if (existsInConfig) {
+      log('CNS manager already present in config/progs');
     }
 
-    await addManager(projectDir, {
-      component: 'node',
-      startMode: 'always',
-      secKill: 30,
-      restartCount: 3,
-      resetMin: 1,
-      options: 'vscodeCns\\index.js',
-    });
+    // Try runtime install via PmonComponent
+    let runtimeSuccess = false;
+    if (projectId) {
+      try {
+        const pmon = new PmonComponent();
+        if (winCCOAVersion) {
+          try {
+            pmon.setVersion(winCCOAVersion);
+          } catch {
+            log(`Could not set WinCC OA version ${winCCOAVersion} for PMON, using auto-detect`);
+          }
+        }
+
+        const managers = await pmon.getManagerOptionsList(projectId);
+        const existsInPmon = managers.some(
+          (m) => m.component === 'node' && m.startOptions?.includes(CNS_MANAGER_KEY),
+        );
+
+        if (existsInPmon) {
+          log('CNS manager already running in PMON');
+          runtimeSuccess = true;
+        } else {
+          const managerOptions: ProjEnvManagerOptions = {
+            component: 'node',
+            startMode: ProjEnvManagerStartMode.Manual,
+            secondToKill: 30,
+            resetMin: 1,
+            resetStartCounter: 3,
+            startOptions: CNS_SCRIPT_REL,
+          };
+          const insertPosition = managers.length;
+          const exitCode = await pmon.insertManagerAt(managerOptions, projectId, insertPosition);
+
+          if (exitCode === 0) {
+            log('CNS manager inserted into PMON at runtime');
+            runtimeSuccess = true;
+          } else {
+            log(`PMON insertManagerAt returned exit code ${exitCode}, falling back to config/progs`);
+          }
+        }
+      } catch (pmonErr: unknown) {
+        const msg = pmonErr instanceof Error ? pmonErr.message : String(pmonErr);
+        log(`PMON not reachable (${msg}) – falling back to config/progs`);
+      }
+    }
+
+    // Ensure persistent entry in config/progs
+    if (!existsInConfig) {
+      try {
+        await addManager(projectDir, {
+          component: 'node',
+          startMode: 'manual',
+          secKill: 30,
+          restartCount: 3,
+          resetMin: 1,
+          options: CNS_SCRIPT_REL,
+        });
+        log('CNS manager added to config/progs');
+      } catch (cfgErr: unknown) {
+        if (!runtimeSuccess) {
+          throw cfgErr;
+        }
+        const msg = cfgErr instanceof Error ? cfgErr.message : String(cfgErr);
+        log(`Could not write config/progs: ${msg}`);
+      }
+    }
   }
 
   private static async configureSettings(token: string): Promise<void> {
