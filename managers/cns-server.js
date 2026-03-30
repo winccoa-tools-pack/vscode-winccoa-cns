@@ -10,6 +10,7 @@
  *   POST /cns/views       → { views: string[] }
  *   POST /cns/trees       → body: { viewPath } → { viewPath, trees: CnsNodeInfo[] }
  *   POST /cns/children    → body: { nodePath } → { nodePath, children: CnsNodeInfo[] }
+ *   POST /cns/node-details → body: { nodePath } → CnsNodeDetails
  *   GET  /cns/events      → SSE stream; fires on every CNS change
  *
  * Auth: Bearer token (CNS_SERVER_TOKEN in .env).
@@ -220,6 +221,69 @@ async function handleGetChildren(res, body) {
   json(res, 200, { nodePath, children: children.map(toCnsNodeInfo) });
 }
 
+/**
+ * Normalise a WinccoaLangString (string | Record<string,string>) to a plain object.
+ * @param {unknown} langStr
+ * @returns {Record<string, string>}
+ */
+function toLangRecord(langStr) {
+  if (!langStr) return {};
+  if (typeof langStr === 'string') return { '': langStr };
+  if (typeof langStr === 'object') return /** @type {Record<string,string>} */ (langStr);
+  return {};
+}
+
+/** POST /cns/node-details */
+async function handleGetNodeDetails(res, body) {
+  const { nodePath } = body;
+  if (!nodePath) { json(res, 400, { error: 'nodePath is required' }); return; }
+
+  // Synchronous CNS calls
+  const displayNames = toLangRecord(winccoa.cnsGetDisplayNames(nodePath));
+  const displayPath = toLangRecord(winccoa.cnsGetDisplayPath(nodePath));
+  const parentPath = winccoa.cnsGetParent(nodePath) ?? '';
+  const rootPath = winccoa.cnsGetRoot(nodePath) ?? '';
+
+  // Custom properties
+  const propKeys = winccoa.cnsGetPropertyKeys(nodePath) ?? [];
+  /** @type {Record<string, unknown>} */
+  const properties = {};
+  for (const key of propKeys) {
+    properties[key] = winccoa.cnsGetProperty(nodePath, key);
+  }
+
+  // User data (Buffer → hex string)
+  let userDataHex = '';
+  try {
+    const buf = winccoa.cnsGetUserData(nodePath);
+    if (buf && buf.length > 0) {
+      userDataHex = buf.toString('hex');
+    }
+  } catch {
+    // user data not available for all nodes
+  }
+
+  // Linked datapoint details
+  const linkedDpElem = winccoa.cnsGetId(nodePath) ?? '';
+  let dp = null;
+  if (linkedDpElem) {
+    const dpName = linkedDpElem.split('.')[0] ?? linkedDpElem;
+    try {
+      const typeName = winccoa.dpTypeName(dpName) ?? '';
+      const description = toLangRecord(await winccoa.dpGetDescription(dpName));
+      const alias = winccoa.dpGetAlias(dpName) ?? '';
+      const format = toLangRecord(await winccoa.dpGetFormat(dpName));
+      const unit = toLangRecord(await winccoa.dpGetUnit(dpName));
+      dp = { dpName: linkedDpElem, typeName, description, alias, format, unit };
+    } catch (err) {
+      console.error(`[cns-server] Failed to fetch DP details for ${dpName}:`, err.message);
+      dp = { dpName: linkedDpElem, typeName: '', description: {}, alias: '', format: {}, unit: {} };
+    }
+  }
+
+  json(res, 200, { path: nodePath, displayNames, displayPath, parentPath, rootPath, properties, userDataHex, dp });
+}
+
 /** GET /cns/events — SSE stream */
 function handleEvents(req, res) {
   res.writeHead(200, {
@@ -286,6 +350,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/cns/children') {
       const body = await readBody(req);
       await handleGetChildren(res, body);
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/cns/node-details') {
+      const body = await readBody(req);
+      await handleGetNodeDetails(res, body);
       return;
     }
 
