@@ -4,6 +4,7 @@ import { CnsEventSubscriber } from './cnsEventSubscriber.js';
 import { CnsTreeProvider } from './cnsTreeProvider.js';
 import { CnsNodeItem } from './cnsTreeItem.js';
 import { CnsSetupWizard } from './cnsSetupWizard.js';
+import { CnsDetailProvider, CNS_DETAILS_VIEW_ID } from './cnsDetailProvider.js';
 import { log, disposeOutput } from './extensionOutput.js';
 
 const CONFIG_SECTION = 'winccoaCns';
@@ -19,6 +20,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const treeProvider = new CnsTreeProvider();
   const httpClient = new CnsHttpClient({ url: '', token: '' });
   const eventSubscriber = new CnsEventSubscriber();
+  const detailProvider = new CnsDetailProvider();
 
   // --- Status bar item ---
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -49,6 +51,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   context.subscriptions.push(treeView);
 
+  // Update detail panel when tree selection changes
+  context.subscriptions.push(
+    treeView.onDidChangeSelection(e => {
+      const selected = e.selection[0];
+      const info = selected instanceof CnsNodeItem ? selected.info : null;
+      void detailProvider.showNode(info);
+    }),
+  );
+
+  // --- Register detail panel webview ---
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(CNS_DETAILS_VIEW_ID, detailProvider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+  );
+
   // --- CNS change event → targeted tree refresh ---
   context.subscriptions.push(
     eventSubscriber.onCnsChanged(_uri => {
@@ -65,6 +83,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!serverUrl || !token) {
       eventSubscriber.disconnect();
       treeProvider.setClient(undefined);
+      detailProvider.setClient(undefined);
+      detailProvider.clearNode();
       updateStatusBar('disconnected');
       return;
     }
@@ -72,6 +92,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log(`Connecting to CNS server at ${serverUrl}`);
     httpClient.updateConfig({ url: serverUrl, token });
     treeProvider.setClient(httpClient);
+    detailProvider.setClient(httpClient);
     updateStatusBar('connected');
 
     try {
