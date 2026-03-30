@@ -53,13 +53,28 @@
     "typescript": "^5.8.0"
   },
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "winccoa-cns",
+          "title": "WinCC OA CNS",
+          "icon": "resources/cns.svg"
+        }
+      ]
+    },
     "views": {
-      "explorer": [
+      "winccoa-cns": [
         {
           "id": "winccoaCns",
-          "name": "WinCC OA CNS",
+          "name": "CNS Tree",
           "icon": "resources/cns.svg",
           "contextualTitle": "WinCC OA CNS Browser"
+        },
+        {
+          "id": "winccoaCnsDetails",
+          "name": "Node Details",
+          "type": "webview",
+          "contextualTitle": "WinCC OA CNS — Node Details"
         }
       ]
     },
