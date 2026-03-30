@@ -6,6 +6,7 @@
  */
 
 import { log } from './extensionOutput.js';
+import type { CnsNodeDetails } from './types.js';
 
 export interface CnsServerConfig {
   url: string;
@@ -58,5 +59,10 @@ export class CnsHttpClient {
   /** Return the auth token (used by CnsEventSubscriber). */
   getToken(): string {
     return this.config.token;
+  }
+
+  /** Fetch all extended details for a CNS node path. */
+  async getNodeDetails(nodePath: string): Promise<CnsNodeDetails> {
+    return this.post<CnsNodeDetails>('/cns/node-details', { nodePath });
   }
 }
